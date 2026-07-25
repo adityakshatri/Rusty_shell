@@ -66,6 +66,14 @@ impl<'a> Lexer<'a> {
                 self.tokens.push(Token::Pipe);
                 self.scanner.advance();
             }
+            '>' => {
+                let next = self.scanner.peek();
+                if next == Some('>') {
+                    self.emit_word();
+                    self.tokens.push(Token::RedirectAppend);
+                    self.scanner.advance();
+                }
+            }
 
             '<' => {
                 self.emit_word();

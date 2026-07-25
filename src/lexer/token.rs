@@ -8,7 +8,9 @@ pub enum Token {
 
     RedirectIn,         // <
 
-    RedirectOut,        // <
+    RedirectOut, 
+    
+    RedirectAppend,       // <
 
     Background,
 
