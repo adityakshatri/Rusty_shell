@@ -1,9 +1,13 @@
-use crate::executor::Executor;
-use crate::lexer::Lexer;
-use crate::parser::Parser;
-use crate::resolver::Resolver;
+//shell.rs
+use crate::shell::executor::Executor;
+use crate::shell::lexer::Lexer;
+use crate::shell::parser::Parser;
+use crate::shell::resolver::Resolver;
 use crate::state::ShellState;
-use std::io::{self, Write};
+
+use crate::frontend::ShellCompleter;
+use rustyline::error::ReadlineError;
+use rustyline::{Config, Editor};
 
 pub struct Shell {
     pub state: ShellState,
@@ -20,17 +24,34 @@ impl Shell {
         }
     }
     pub fn run(&mut self) {
+        let config = Config::default();
+
+        let mut editor =
+         match Editor::<ShellCompleter, _>::with_config(config) {
+            Ok(editor) => editor,
+            Err(error) => {
+                eprintln!("failed to initialize line editor: {error}");
+                return;
+            }
+        };
+        editor.set_helper(Some(ShellCompleter::new()));
         loop {
-            print!("$ ");
-            io::stdout().flush().unwrap();
+            let input = match editor.readline("$ ") {
+                Ok(line) => line,
 
-            let mut input = String::new();
+                Err(ReadlineError::Interrupted) => {
+                    continue;
+                }
 
-            io::stdin()
-                .read_line(&mut input)
-                .expect("failed to read line");
+                Err(ReadlineError::Eof) => {
+                    break;
+                }
 
-            let input = input.trim();
+                Err(error) => {
+                    eprintln!("readline error: {error}");
+                    break;
+                }
+            };
 
             if input.is_empty() {
                 continue;
@@ -40,7 +61,7 @@ impl Shell {
                 break;
             }
 
-            let lexer = Lexer::new(input);
+            let lexer = Lexer::new(&input);
 
             let tokens = lexer.lex();
 
@@ -71,7 +92,7 @@ impl Shell {
             println!("{resolved:#?}");
             let executor = Executor::new();
 
-            if let Err(err) = executor.execute(&mut self.state,resolved) {
+            if let Err(err) = executor.execute(&mut self.state, resolved) {
                 eprintln!("{err}");
             }
         }

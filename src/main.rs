@@ -1,11 +1,8 @@
 mod shell;
-mod lexer;
-mod parser;
-mod resolver;
-mod executor;
 mod state;
+mod frontend;
 
-use shell::Shell;
+use crate::shell::core::Shell;
 
 fn main() {
     let mut shell = Shell::new();

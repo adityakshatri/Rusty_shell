@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use super::resolved::CommandInvocation;
 use super::resolved::ResolvedCommand;
 
-use crate::parser::{AST, SimpleCommand};
+use crate::shell::parser::{AST, SimpleCommand};
 
 pub struct Resolver;
 
@@ -86,11 +86,31 @@ impl Resolver {
         }
     }
     fn is_special_builtin(&self, command: &str) -> bool {
-        matches!(command, "break" | "continue" | "return" | "exec" | "exit")
+        matches!(command,
+
+            "break"     | 
+
+            "continue"  |
+
+            "return"    | 
+
+            "exec"      | 
+            
+            "exit"
+        )
     }
 
     fn is_builtin(&self, command: &str) -> bool {
-        matches!(command, "cd" | "pwd" | "echo" | "history")
+        matches!(command, 
+
+            "cd"    | 
+
+            "pwd"   | 
+
+            "echo"  | 
+
+            "history"
+        )
     }
     fn is_function(&self, _: &str) -> bool {
         false

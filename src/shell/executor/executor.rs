@@ -1,6 +1,6 @@
-use crate::parser::{Redirect, RedirectMode};
-use crate::resolver::ResolvedCommand;
-use crate::resolver::resolved::CommandInvocation;
+use crate::shell::parser::{Redirect, RedirectMode};
+use crate::shell::resolver::ResolvedCommand;
+use crate::shell::resolver::resolved::CommandInvocation;
 use crate::state::ShellState;
 use std::fs::{File, OpenOptions};
 use std::os::fd::{AsRawFd, RawFd};
@@ -80,7 +80,7 @@ impl Executor {
                         }
                     }
                 }
-                // Standard Append (`>>`)
+                //TODO: not working
                 RedirectMode::Append => {
                     let file = OpenOptions::new()
                         .write(true)
@@ -195,7 +195,7 @@ impl Executor {
 
         Ok(())
     }
-    
+
     fn expand_cd_target(&self, state: &ShellState, target: &str) -> Result<String, String> {
         match target {
             "-" => state

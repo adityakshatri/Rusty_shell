@@ -5,7 +5,7 @@ pub enum Token {
     Word(String),
 
     Pipe,
-
+//TODO: support stderr stdin and following redirections
     RedirectIn,         // <
 
     RedirectOut, 

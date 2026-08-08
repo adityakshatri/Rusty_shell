@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use crate::parser::Redirect;
+use crate::shell::parser::Redirect;
 
 #[derive(Debug,Clone)]
 pub enum ResolvedCommand {

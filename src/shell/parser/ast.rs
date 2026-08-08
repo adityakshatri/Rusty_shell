@@ -6,7 +6,7 @@ pub enum RedirectMode {
     Output,
 
     Append,
-
+//TODO
    // Error,
 
   //  ErrorAppend,

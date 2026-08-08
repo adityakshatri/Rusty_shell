@@ -1,5 +1,5 @@
-use crate::lexer::Token;
-use crate::parser::{AST, Redirect, RedirectMode, SimpleCommand};
+use crate::shell::lexer::Token;
+use crate::shell::parser::{AST, Redirect, RedirectMode, SimpleCommand};
 
 pub struct Parser {
     pub tokens: Vec<Token>,
