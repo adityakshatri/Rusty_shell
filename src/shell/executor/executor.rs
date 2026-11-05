@@ -1,120 +1,102 @@
-use crate::shell::parser::{Redirect, RedirectMode};
+use crate::shell::resolver::redirection::{
+    resolve,
+    ResolvedRedirections,
+};
 use crate::shell::resolver::ResolvedCommand;
 use crate::shell::resolver::resolved::CommandInvocation;
 use crate::state::ShellState;
-use std::fs::{File, OpenOptions};
+
+use std::io::{self, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-pub struct Executor {
-    //previous_dir: Option<PathBuf>,
-    //curr_dir: Option<PathBuf>,
-}
-
+pub struct Executor;
 
 impl Executor {
     pub fn new() -> Self {
-        Self {}
+        Self
     }
 
-    pub fn execute(&self, state: &mut ShellState, command: ResolvedCommand) -> Result<(), String> {
-        match command {
-            ResolvedCommand::SpecialBuiltin(invocation) => {self.execute_with_redirects( &invocation, | invocation| {
-                self.execute_special_builtin(state, invocation)
-            })}
+    pub fn execute(
+        &self,
+        state: &mut ShellState,
+        command: ResolvedCommand,
+    ) -> Result<(), String> {
+        // Borrow the command to get its raw redirects.
+        let raw_redirects = match &command {
+            ResolvedCommand::SpecialBuiltin(invocation)
+            | ResolvedCommand::Builtin(invocation)
+            | ResolvedCommand::Function(invocation) => &invocation.redirects,
 
-            ResolvedCommand::Builtin(invocation) => {self.execute_with_redirects(&invocation, | invocation| 
-                self.execute_builtin(state, invocation))
+            ResolvedCommand::External { invocation, .. } => {
+                &invocation.redirects
             }
-            ResolvedCommand::Function(invocation) => self.execute_function(invocation),
+        };
+
+        // Resolve redirects exactly once.
+        let redirects = resolve(raw_redirects)?;
+
+        // Dispatch the command with the resolved redirect handles.
+        match command {
+            ResolvedCommand::SpecialBuiltin(invocation) => {
+                self.execute_builtin_with_redirects(redirects, || {
+                    self.execute_special_builtin(state, invocation)
+                })
+            }
+
+            ResolvedCommand::Builtin(invocation) => {
+                self.execute_builtin_with_redirects(redirects, || {
+                    self.execute_builtin(state, invocation)
+                })
+            }
+
+            ResolvedCommand::Function(invocation) => {
+                self.execute_function(invocation, redirects)
+            }
 
             ResolvedCommand::External { path, invocation } => {
-                self.execute_external(path, invocation)
+                self.execute_external(path, invocation, redirects)
             }
         }
     }
 
-    fn execute_with_redirects<F>(&self, invocation: &CommandInvocation, f: F) -> Result<(), String>
+    fn execute_builtin_with_redirects<F>(
+        &self,
+        redirects: ResolvedRedirections,
+        f: F,
+    ) -> Result<(), String>
     where
-        F: FnOnce(CommandInvocation) -> Result<(), String>,
+        F: FnOnce() -> Result<(), String>,
     {
-        if invocation.redirects.is_empty() {
-            return f(invocation.clone());
-        } else {
-            //store fds for restore or reuse
-            let stdout_bak = unsafe { libc::dup(libc::STDOUT_FILENO) };
-            let stdin_bak = unsafe { libc::dup(libc::STDIN_FILENO) };
-
-            let apply_result = self.apply_redirects(&invocation.redirects);
-
-            let exec_result = if apply_result.is_ok() {
-                f(invocation.clone())
-            } else {
-                Err(apply_result.unwrap_err())
-            };
-            unsafe {
-                libc::dup2(stdout_bak, libc::STDOUT_FILENO);
-                libc::dup2(stdin_bak, libc::STDIN_FILENO);
-                libc::close(stdout_bak);
-                libc::close(stdin_bak);
-            }
-            exec_result
+        if redirects.is_empty() {
+            return f();
         }
-        
-    }
 
-    fn apply_redirects(&self, redirects: &[Redirect]) -> Result<(), String> {
-        for redirect in redirects {
-            match redirect.mode {
-                RedirectMode::Output => {
-                    let file = OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .truncate(true)
-                        .open(&redirect.target)
-                        .map_err(|e| format!("{}:{}", redirect.target, e))?;
+        // Save the shell's original stdin/stdout.
+        let guard = FdRestoreGuard::new()
+            .map_err(|e| format!("Failed to save file descriptors: {}", e))?;
 
-                    unsafe {
-                        if libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) == -1 {
-                            return Err("Failed to redirect stdout".to_string());
-                        }
-                    }
-                }
-                //TODO: not working
-                RedirectMode::Append => {
-                    let file = OpenOptions::new()
-                        .write(true)
-                        .create(true)
-                        .append(true)
-                        .open(&redirect.target)
-                        .map_err(|e| format!("{}: {}", redirect.target, e))?;
+        // Apply the resolved handles to the shell process.
+        let apply_result = apply_to_shell(&redirects);
 
-                    unsafe {
-                        if libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) == -1 {
-                            return Err("Failed to redirect stdout".to_string());
-                        }
-                    }
-                }
-                // Input Redirection (`<`)
-                RedirectMode::Input => {
-                    let file = File::open(&redirect.target)
-                        .map_err(|e| format!("{}: {}", redirect.target, e))?;
+        let result = match apply_result {
+            Ok(()) => f(),
+            Err(error) => Err(error),
+        };
 
-                    unsafe {
-                        if libc::dup2(file.as_raw_fd(), libc::STDIN_FILENO) == -1 {
-                            return Err("Failed to redirect stdin".to_string());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
+        // Flush any buffered builtin output before restoring stdout.
+        let _ = io::stdout().flush();
+
+        // Restore happens in FdRestoreGuard::drop().
+        drop(guard);
+
+        result
     }
 
     fn execute_special_builtin(
         &self,
-        state: &mut ShellState,
+        _state: &mut ShellState,
         invocation: CommandInvocation,
     ) -> Result<(), String> {
         match invocation.name.as_str() {
@@ -137,12 +119,12 @@ impl Executor {
         match invocation.name.as_str() {
             "echo" => {
                 println!("{}", invocation.args.join(" "));
-
                 Ok(())
             }
 
             "pwd" => {
-                let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+                let cwd =
+                    std::env::current_dir().map_err(|e| e.to_string())?;
 
                 println!("{}", cwd.display());
 
@@ -151,28 +133,63 @@ impl Executor {
 
             "cd" => self.cd(state, invocation),
 
-            _ => Err(format!("unimplemented builtin: {}", invocation.name)),
+            _ => Err(format!(
+                "unimplemented builtin: {}",
+                invocation.name
+            )),
         }
     }
 
-    fn execute_function(&self, invocation: CommandInvocation) -> Result<(), String> {
-        Err(format!("function not implemented: {}", invocation.name))
+    fn execute_function(
+        &self,
+        invocation: CommandInvocation,
+        _redirects: ResolvedRedirections,
+    ) -> Result<(), String> {
+        Err(format!(
+            "function not implemented: {}",
+            invocation.name
+        ))
     }
-    
-    fn execute_external(&self, path: PathBuf, invocation: CommandInvocation) -> Result<(), String> {
-        let status = Command::new(path)
-            .args(&invocation.args)
+
+    fn execute_external(
+        &self,
+        path: PathBuf,
+        invocation: CommandInvocation,
+        redirects: ResolvedRedirections,
+    ) -> Result<(), String> {
+        let mut command = Command::new(path);
+
+        command.args(&invocation.args);
+
+        // External commands use child-process stdio configuration.
+        if let Some(file) = redirects.stdin {
+            command.stdin(Stdio::from(file));
+        }
+
+        if let Some(file) = redirects.stdout {
+            command.stdout(Stdio::from(file));
+        }
+
+        // Unconfigured streams inherit the shell's streams.
+        let status = command
             .status()
             .map_err(|e| e.to_string())?;
 
         if !status.success() {
-            return Err(format!("process exited with status {}", status));
+            return Err(format!(
+                "process exited with status {}",
+                status
+            ));
         }
 
         Ok(())
     }
 
-    fn cd(&self, state: &mut ShellState, invocation: CommandInvocation) -> Result<(), String> {
+    fn cd(
+        &self,
+        state: &mut ShellState,
+        invocation: CommandInvocation,
+    ) -> Result<(), String> {
         let raw_target = if invocation.args.is_empty() {
             "~"
         } else {
@@ -181,14 +198,16 @@ impl Executor {
 
         let target = self.expand_cd_target(state, raw_target)?;
 
-        let old_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+        let old_dir =
+            std::env::current_dir().map_err(|e| e.to_string())?;
 
-        std::env::set_current_dir(&target).map_err(|e| format!("cd: {}: {}", target, e))?;
+        std::env::set_current_dir(&target)
+            .map_err(|e| format!("cd: {}: {}", target, e))?;
 
-        let new_dir = std::env::current_dir().map_err(|e| e.to_string())?;
+        let new_dir =
+            std::env::current_dir().map_err(|e| e.to_string())?;
 
         state.previous_directory = Some(old_dir);
-
         state.cwd = new_dir.clone();
 
         if raw_target == "-" {
@@ -198,7 +217,11 @@ impl Executor {
         Ok(())
     }
 
-    fn expand_cd_target(&self, state: &ShellState, target: &str) -> Result<String, String> {
+    fn expand_cd_target(
+        &self,
+        state: &ShellState,
+        target: &str,
+    ) -> Result<String, String> {
         match target {
             "-" => state
                 .previous_directory
@@ -206,10 +229,12 @@ impl Executor {
                 .map(|p| p.to_string_lossy().to_string())
                 .ok_or_else(|| "cd: OLDPWD not set".to_string()),
 
-            "~" => std::env::var("HOME").map_err(|_| "HOME not set".to_string()),
+            "~" => std::env::var("HOME")
+                .map_err(|_| "HOME not set".to_string()),
 
             _ if target.starts_with("~/") => {
-                let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+                let home = std::env::var("HOME")
+                    .map_err(|_| "HOME not set".to_string())?;
 
                 Ok(format!("{}/{}", home, &target[2..]))
             }
@@ -217,5 +242,107 @@ impl Executor {
             _ => Ok(target.to_string()),
         }
     }
-    // fn resolve_redirects(&self, command: Command, redirect: Redirect) -> Result<String, String> {}
+}
+
+
+/// Saves stdin/stdout and restores them when dropped.
+///
+/// This guard ensures that builtin redirection does not permanently
+/// change the shell's own file descriptors.
+struct FdRestoreGuard {
+    stdin_backup: RawFd,
+    stdout_backup: RawFd,
+}
+
+impl FdRestoreGuard {
+    fn new() -> io::Result<Self> {
+        io::stdout().flush()?;
+
+        let stdout_backup = unsafe {
+            libc::dup(libc::STDOUT_FILENO)
+        };
+
+        if stdout_backup == -1 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let stdin_backup = unsafe {
+            libc::dup(libc::STDIN_FILENO)
+        };
+
+        if stdin_backup == -1 {
+            unsafe {
+                libc::close(stdout_backup);
+            }
+
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            stdin_backup,
+            stdout_backup,
+        })
+    }
+}
+
+impl Drop for FdRestoreGuard {
+    fn drop(&mut self) {
+        let _ = io::stdout().flush();
+
+        unsafe {
+            libc::dup2(
+                self.stdout_backup,
+                libc::STDOUT_FILENO,
+            );
+
+            libc::dup2(
+                self.stdin_backup,
+                libc::STDIN_FILENO,
+            );
+
+            libc::close(self.stdout_backup);
+            libc::close(self.stdin_backup);
+        }
+    }
+}
+
+
+/// Applies already-resolved file handles to the shell process.
+/// Used only for in-process commands such as builtins.
+fn apply_to_shell(
+    redirects: &ResolvedRedirections,
+) -> Result<(), String> {
+    if let Some(file) = &redirects.stdin {
+        let result = unsafe {
+            libc::dup2(
+                file.as_raw_fd(),
+                libc::STDIN_FILENO,
+            )
+        };
+
+        if result == -1 {
+            return Err(format!(
+                "Failed to redirect stdin: {}",
+                io::Error::last_os_error()
+            ));
+        }
+    }
+
+    if let Some(file) = &redirects.stdout {
+        let result = unsafe {
+            libc::dup2(
+                file.as_raw_fd(),
+                libc::STDOUT_FILENO,
+            )
+        };
+
+        if result == -1 {
+            return Err(format!(
+                "Failed to redirect stdout: {}",
+                io::Error::last_os_error()
+            ));
+        }
+    }
+
+    Ok(())
 }

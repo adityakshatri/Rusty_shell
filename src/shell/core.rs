@@ -65,20 +65,17 @@ impl Shell {
 
             let tokens = lexer.lex();
 
-            println!("{:#?}", tokens);
-
             let mut parser = Parser::new(tokens);
 
             let ast = match parser.parse() {
                 Ok(ast) => ast,
 
                 Err(err) => {
-                    println!("{}", err);
+                    eprintln!("{}", err);
                     continue;
                 }
             };
 
-            println!("{:#?}", ast);
             let resolver = Resolver::new();
 
             let resolved = match resolver.resolve(ast) {
@@ -89,7 +86,7 @@ impl Shell {
                 }
             };
 
-            println!("{resolved:#?}");
+           
             let executor = Executor::new();
 
             if let Err(err) = executor.execute(&mut self.state, resolved) {

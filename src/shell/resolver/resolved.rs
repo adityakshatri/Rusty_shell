@@ -11,9 +11,18 @@ pub enum ResolvedCommand {
         invocation: CommandInvocation,
     },
 }
+
 #[derive(Debug,Clone)]
 pub struct CommandInvocation {
     pub name: String,
     pub args: Vec<String>,
     pub redirects: Vec<Redirect>,
+}
+
+
+#[derive(Debug,Clone)]
+pub struct ResolvedRedirections {
+    pub stdin: Option<std::fs::File>,
+    pub stdout: Option<std::fs::File>,
+    pub stderr: Option<std::fs::File>,
 }

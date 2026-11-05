@@ -2,23 +2,17 @@
 pub enum RedirectMode {
 
     Input,
-
     Output,
-
     Append,
-//TODO
-   // Error,
-
-  //  ErrorAppend,
+    //TODO
+    //Error,
+    //ErrorAppend,
 
 }
 #[derive(Debug,Clone)]
 pub struct Redirect {
-
     pub mode: RedirectMode,
-
     pub target: String,  //filename
-
 }
 
 #[derive(Debug)]

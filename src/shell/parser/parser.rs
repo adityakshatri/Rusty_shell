@@ -18,62 +18,96 @@ impl Parser {
         self.tokens.get(self.position)
     }
 
-    //only supports simple command currently
     pub fn parse(&mut self) -> Result<AST, String> {
         self.parse_simple_command()
     }
 
     fn advance(&mut self) {
-        self.position += 1;
+        if self.position < self.tokens.len() {
+            self.position += 1;
+        }
     }
+
     fn parse_simple_command(&mut self) -> Result<AST, String> {
         let mut words = Vec::new();
         let mut redirects = Vec::new();
-        while let Some(token) = self.current() {
-            match token {
-                Token::Word(word) => {
+
+        loop {
+            match self.current() {
+                Some(Token::Word(word)) => {
                     words.push(word.clone());
                     self.advance();
                 }
 
-                Token::RedirectIn => {
+                Some(Token::RedirectIn) => {
                     self.advance();
-                    if let Some(Token::Word(filename)) = self.current() {
-                        redirects.push(Redirect {
-                            mode: RedirectMode::Input,
-                            target: filename.clone(),
-                        })
-                    }
-                    self.advance();
+
+                    let filename = self.take_redirect_target()?;
+
+                    redirects.push(Redirect {
+                        mode: RedirectMode::Input,
+                        target: filename,
+                    });
                 }
-                Token::RedirectOut => {
+
+                Some(Token::RedirectOut) => {
                     self.advance();
-                    if let Some(Token::Word(filename)) = self.current() {
-                        redirects.push(Redirect {
-                            mode: RedirectMode::Output,
-                            target: filename.clone(),
-                        })
-                    } else {
-                        // Fallback: Redirect to stdout instead of crashing
-                        redirects.push(Redirect {
-                            mode: RedirectMode::Output,
-                            target: String::from("/dev/stdout"), // Or use "-" depending on your parser design
-                        });
-                    }
-                    
+
+                    let filename = self.take_redirect_target()?;
+
+                    redirects.push(Redirect {
+                        mode: RedirectMode::Output,
+                        target: filename,
+                    });
                 }
-                Token::EOF => break,
-                _ => return Err("Unexpected Token".to_string()),
+
+                Some(Token::RedirectAppend) => {
+                    self.advance();
+
+                    let filename = self.take_redirect_target()?;
+
+                    redirects.push(Redirect {
+                        mode: RedirectMode::Append,
+                        target: filename,
+                    });
+                }
+
+                Some(Token::EOF) | None => break,
+
+                Some(_) => {
+                    return Err("Unexpected token in simple command".to_string());
+                }
             }
         }
+
         if words.is_empty() {
-            return Err("Empty Command".to_string());
+            return Err("Empty command".to_string());
         }
+
         let command = words.remove(0);
+
         Ok(AST::Simple(SimpleCommand {
             command,
             args: words,
             redirects,
         }))
+    }
+
+    fn take_redirect_target(&mut self) -> Result<String, String> {
+        match self.current() {
+            Some(Token::Word(filename)) => {
+                let filename = filename.clone();
+                self.advance();
+                Ok(filename)
+            }
+
+            Some(Token::EOF) | None => {
+                Err("Syntax error: expected filename after redirection".to_string())
+            }
+
+            Some(_) => {
+                Err("Syntax error: expected filename after redirection".to_string())
+            }
+        }
     }
 }
