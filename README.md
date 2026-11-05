@@ -1,4 +1,1 @@
-POSIX compliant shell that's capable of
-interpreting shell commands, running external programs and builtin commands like
-cd, pwd, echo and much more
-
+An experimental Unix shell written in Rust, featuring a hand-written lexer, recursive-descent parser, command resolver, builtin commands, external process execution, I/O redirection, and interactive command completion.

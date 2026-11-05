@@ -17,6 +17,7 @@ impl Executor {
     pub fn new() -> Self {
         Self {}
     }
+
     pub fn execute(&self, state: &mut ShellState, command: ResolvedCommand) -> Result<(), String> {
         match command {
             ResolvedCommand::SpecialBuiltin(invocation) => {self.execute_with_redirects( &invocation, | invocation| {
@@ -157,6 +158,7 @@ impl Executor {
     fn execute_function(&self, invocation: CommandInvocation) -> Result<(), String> {
         Err(format!("function not implemented: {}", invocation.name))
     }
+    
     fn execute_external(&self, path: PathBuf, invocation: CommandInvocation) -> Result<(), String> {
         let status = Command::new(path)
             .args(&invocation.args)

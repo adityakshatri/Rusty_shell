@@ -54,8 +54,11 @@ impl Parser {
                             target: filename.clone(),
                         })
                     } else {
-                        // Handle syntax error: missing filename after '>'
-                        panic!("Syntax error: expected filename after '>'");
+                        // Fallback: Redirect to stdout instead of crashing
+                        redirects.push(Redirect {
+                            mode: RedirectMode::Output,
+                            target: String::from("/dev/stdout"), // Or use "-" depending on your parser design
+                        });
                     }
                     
                 }
