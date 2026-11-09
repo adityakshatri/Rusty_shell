@@ -1,13 +1,12 @@
-//shell.rs
+use crate::frontend::ShellCompleter;
 use crate::shell::executor::Executor;
 use crate::shell::lexer::Lexer;
 use crate::shell::parser::Parser;
 use crate::shell::resolver::Resolver;
 use crate::state::ShellState;
 
-use crate::frontend::ShellCompleter;
 use rustyline::error::ReadlineError;
-use rustyline::{Config, Editor};
+use rustyline::{CompletionType, Config, Editor};
 
 pub struct Shell {
     pub state: ShellState,
@@ -23,75 +22,58 @@ impl Shell {
             executor: Executor::new(),
         }
     }
-    pub fn run(&mut self) {
-        let config = Config::default();
 
-        let mut editor =
-         match Editor::<ShellCompleter, _>::with_config(config) {
+    /// Runs the interactive loop. Returns the exit status for the process.
+    pub fn run(&mut self) -> i32 {
+        let config = Config::builder()
+    .       completion_type(CompletionType::List)
+    .       build();
+
+        let mut editor = match Editor::<ShellCompleter, _>::with_config(config) {
             Ok(editor) => editor,
             Err(error) => {
                 eprintln!("failed to initialize line editor: {error}");
-                return;
+                return 1;
             }
         };
-        editor.set_helper(Some(ShellCompleter::new()));
+        editor.set_helper(Some(ShellCompleter::new(self.resolver.clone())));
+
         loop {
+            self.executor.reap_background(&mut self.state);
+
             let input = match editor.readline("$ ") {
                 Ok(line) => line,
-
-                Err(ReadlineError::Interrupted) => {
-                    continue;
-                }
-
-                Err(ReadlineError::Eof) => {
-                    break;
-                }
-
+                Err(ReadlineError::Interrupted) => continue,
+                Err(ReadlineError::Eof) => break,
                 Err(error) => {
                     eprintln!("readline error: {error}");
                     break;
                 }
             };
 
-            if input.is_empty() {
+            let line = input.trim();
+            if line.is_empty() {
                 continue;
             }
 
-            if (input.to_lowercase() == "exit") || (input.to_lowercase() == "quit") {
-                break;
-            }
+            let tokens = Lexer::new(line).lex();
 
-            let lexer = Lexer::new(&input);
-
-            let tokens = lexer.lex();
-
-            let mut parser = Parser::new(tokens);
-
-            let ast = match parser.parse() {
+            let ast = match Parser::new(tokens).parse() {
                 Ok(ast) => ast,
-
-                Err(err) => {
-                    eprintln!("{}", err);
-                    continue;
-                }
-            };
-
-            let resolver = Resolver::new();
-
-            let resolved = match resolver.resolve(ast) {
-                Ok(command) => command,
                 Err(err) => {
                     eprintln!("{err}");
+                    self.state.last_status = 2;
                     continue;
                 }
             };
 
-           
-            let executor = Executor::new();
+            self.executor.execute(&mut self.state, &self.resolver, ast);
 
-            if let Err(err) = executor.execute(&mut self.state, resolved) {
-                eprintln!("{err}");
+            if let Some(code) = self.state.exit_requested {
+                return code;
             }
         }
+
+        self.state.last_status
     }
 }

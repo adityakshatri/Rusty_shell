@@ -1,10 +1,11 @@
+mod frontend;
 mod shell;
 mod state;
-mod frontend;
 
 use crate::shell::core::Shell;
 
 fn main() {
     let mut shell = Shell::new();
-    shell.run();
+    let code = shell.run();
+    std::process::exit(code);
 }

@@ -1,26 +1,19 @@
-
-//basic token types
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     Word(String),
 
-    Pipe,
-//TODO: support stderr stdin and following redirections
-    RedirectIn,         // <
+    Pipe,          // |
+    AndIf,         // &&
+    OrIf,          // ||
 
-    RedirectOut, 
-    
-    RedirectAppend,       // <
+    RedirectIn,    // <
+    RedirectOut,   // >
+    RedirectAppend,// >>
 
-    Background,
-
-    Semicolon,
-
-    LeftParen,
-
-    RightParen,
-
-    Ampersand,
+    Background,    // &
+    Semicolon,     // ;
+    LeftParen,     // (
+    RightParen,    // )
 
     EOF,
 }

@@ -1,30 +1,60 @@
-#[derive(Debug,Clone)]
+/// Redirection kinds supported by the shell.
+#[derive(Debug, Clone)]
 pub enum RedirectMode {
-
-    Input,
-    Output,
-    Append,
-    //TODO
-    //Error,
-    //ErrorAppend,
-
+    Input,  // <
+    Output, // >
+    Append, // >>
+    // TODO: stderr redirections (2>, 2>>)
 }
-#[derive(Debug,Clone)]
+
+#[derive(Debug, Clone)]
 pub struct Redirect {
     pub mode: RedirectMode,
-    pub target: String,  //filename
+    pub target: String,
 }
 
-#[derive(Debug)]
+/// A single command: `name args... redirects...`.
+#[derive(Debug, Clone)]
 pub struct SimpleCommand {
     pub command: String,
     pub args: Vec<String>,
-    //pub background: bool,
     pub redirects: Vec<Redirect>,
 }
-//defines the nodes and edges in AST
-#[derive(Debug)]
-pub enum AST {
-    Simple(SimpleCommand),
+
+/// `cmd1 | cmd2 | cmd3`
+#[derive(Debug, Clone)]
+pub struct Pipeline {
+    pub commands: Vec<SimpleCommand>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connector {
+    And, // &&
+    Or,  // ||
+}
+
+/// `p1 && p2 || p3`, evaluated left to right with short-circuiting.
+#[derive(Debug, Clone)]
+pub struct AndOr {
+    pub first: Pipeline,
+    pub rest: Vec<(Connector, Pipeline)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Separator {
+    Sequential, // ; or end of line
+    Background, // &
+}
+
+/// One entry of a command list, plus how it is terminated.
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    pub and_or: AndOr,
+    pub separator: Separator,
+}
+
+/// A whole input line.
+#[derive(Debug, Clone, Default)]
+pub struct AST {
+    pub items: Vec<ListItem>,
+}

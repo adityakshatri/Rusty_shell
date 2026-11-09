@@ -1,15 +1,14 @@
-use crate::shell::resolver::redirection::{
-    resolve,
-    ResolvedRedirections,
-};
-use crate::shell::resolver::ResolvedCommand;
-use crate::shell::resolver::resolved::CommandInvocation;
-use crate::state::ShellState;
+use std::fs::File;
+use std::io::{self, PipeReader, Write};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::{env, thread};
 
-use std::io::{self, Write};
-use std::os::fd::{AsRawFd, RawFd};
-use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use crate::shell::parser::{AndOr, AST, Connector, Pipeline, Separator};
+use crate::shell::resolver::redirection::{resolve as resolve_redirects, ResolvedRedirections};
+use crate::shell::resolver::resolved::CommandInvocation;
+use crate::shell::resolver::{ResolvedCommand, Resolver};
+use crate::state::ShellState;
 
 pub struct Executor;
 
@@ -18,210 +17,274 @@ impl Executor {
         Self
     }
 
-    pub fn execute(
+    /// Runs every item of a parsed line and returns the status of the last one.
+    /// Sets `state.last_status` after each item and stops early on `exit`.
+    pub fn execute(&self, state: &mut ShellState, resolver: &Resolver, ast: AST) -> i32 {
+        let mut status = 0;
+
+        for item in ast.items {
+            let background = item.separator == Separator::Background;
+
+            status = self.run_and_or(state, resolver, &item.and_or, background);
+            if background {
+                status = 0; // like bash, `&` always reports success
+            }
+
+            state.last_status = status;
+
+            if state.exit_requested.is_some() {
+                break;
+            }
+        }
+
+        status
+    }
+
+    /// Collects finished background children so they do not stay as zombies.
+    pub fn reap_background(&self, state: &mut ShellState) {
+        state
+            .background
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    }
+
+    fn run_and_or(
         &self,
         state: &mut ShellState,
-        command: ResolvedCommand,
-    ) -> Result<(), String> {
-        // Borrow the command to get its raw redirects.
-        let raw_redirects = match &command {
-            ResolvedCommand::SpecialBuiltin(invocation)
-            | ResolvedCommand::Builtin(invocation)
-            | ResolvedCommand::Function(invocation) => &invocation.redirects,
+        resolver: &Resolver,
+        and_or: &AndOr,
+        background: bool,
+    ) -> i32 {
+        // Only a lone pipeline can run in the background; chains run in the foreground.
+        let first_background = background && and_or.rest.is_empty();
+        let mut status = self.run_pipeline(state, resolver, &and_or.first, first_background);
 
-            ResolvedCommand::External { invocation, .. } => {
-                &invocation.redirects
-            }
-        };
+        for (connector, pipeline) in &and_or.rest {
+            let should_run = match connector {
+                Connector::And => status == 0,
+                Connector::Or => status != 0,
+            };
 
-        // Resolve redirects exactly once.
-        let redirects = resolve(raw_redirects)?;
-
-        // Dispatch the command with the resolved redirect handles.
-        match command {
-            ResolvedCommand::SpecialBuiltin(invocation) => {
-                self.execute_builtin_with_redirects(redirects, || {
-                    self.execute_special_builtin(state, invocation)
-                })
+            if should_run {
+                status = self.run_pipeline(state, resolver, pipeline, false);
             }
 
-            ResolvedCommand::Builtin(invocation) => {
-                self.execute_builtin_with_redirects(redirects, || {
-                    self.execute_builtin(state, invocation)
-                })
-            }
-
-            ResolvedCommand::Function(invocation) => {
-                self.execute_function(invocation, redirects)
-            }
-
-            ResolvedCommand::External { path, invocation } => {
-                self.execute_external(path, invocation, redirects)
+            if state.exit_requested.is_some() {
+                break;
             }
         }
+
+        status
     }
 
-    fn execute_builtin_with_redirects<F>(
-        &self,
-        redirects: ResolvedRedirections,
-        f: F,
-    ) -> Result<(), String>
-    where
-        F: FnOnce() -> Result<(), String>,
-    {
-        if redirects.is_empty() {
-            return f();
-        }
-
-        // Save the shell's original stdin/stdout.
-        let guard = FdRestoreGuard::new()
-            .map_err(|e| format!("Failed to save file descriptors: {}", e))?;
-
-        // Apply the resolved handles to the shell process.
-        let apply_result = apply_to_shell(&redirects);
-
-        let result = match apply_result {
-            Ok(()) => f(),
-            Err(error) => Err(error),
-        };
-
-        // Flush any buffered builtin output before restoring stdout.
-        let _ = io::stdout().flush();
-
-        // Restore happens in FdRestoreGuard::drop().
-        drop(guard);
-
-        result
-    }
-
-    fn execute_special_builtin(
-        &self,
-        _state: &mut ShellState,
-        invocation: CommandInvocation,
-    ) -> Result<(), String> {
-        match invocation.name.as_str() {
-            "exit" => {
-                std::process::exit(0);
-            }
-
-            _ => Err(format!(
-                "unimplemented special builtin: {}",
-                invocation.name
-            )),
-        }
-    }
-
-    fn execute_builtin(
+    fn run_pipeline(
         &self,
         state: &mut ShellState,
-        invocation: CommandInvocation,
-    ) -> Result<(), String> {
-        match invocation.name.as_str() {
-            "echo" => {
-                println!("{}", invocation.args.join(" "));
-                Ok(())
+        resolver: &Resolver,
+        pipeline: &Pipeline,
+        background: bool,
+    ) -> i32 {
+        // Resolve every stage before starting any of them.
+        let mut stages = Vec::with_capacity(pipeline.commands.len());
+        for simple in &pipeline.commands {
+            match resolver.resolve(simple) {
+                Ok(command) => stages.push(command),
+                Err(err) => {
+                    eprintln!("{err}");
+                    return err.exit_code();
+                }
             }
+        }
 
-            "pwd" => {
-                let cwd =
-                    std::env::current_dir().map_err(|e| e.to_string())?;
+        // Background only makes sense for pipelines of external programs.
+        // Builtins would have to run in a subshell, so those run in the foreground.
+        let background = background && stages.iter().all(ResolvedCommand::is_external);
 
-                println!("{}", cwd.display());
+        let stage_count = stages.len();
+        let mut children: Vec<Child> = Vec::new();
+        let mut last_child: Option<usize> = None;
+        let mut last_status = 0;
 
-                Ok(())
+        // Output of the previous stage that feeds the next one.
+        let mut next_stdin: Option<PipeReader> = None; // from an external stage
+        let mut next_bytes: Option<Vec<u8>> = None; // from a builtin stage
+
+        for (index, command) in stages.into_iter().enumerate() {
+            let is_last = index + 1 == stage_count;
+
+            let ResolvedRedirections {
+                stdin: file_stdin,
+                stdout: mut file_stdout,
+            } = match resolve_redirects(&command.invocation().redirects) {
+                Ok(redirects) => redirects,
+                Err(message) => {
+                    eprintln!("{message}");
+                    last_status = 1;
+                    break;
+                }
+            };
+
+            // An explicit `<` overrides the pipe from the previous stage.
+            let stdin = match take_stdin(file_stdin, &mut next_stdin, &mut next_bytes) {
+                Ok(stdin) => stdin,
+                Err(message) => {
+                    eprintln!("{message}");
+                    last_status = 1;
+                    break;
+                }
+            };
+
+            match command {
+                ResolvedCommand::SpecialBuiltin(invocation) | ResolvedCommand::Builtin(invocation) => {
+                    let mut captured: Vec<u8> = Vec::new();
+
+                    let status = match file_stdout.as_mut() {
+                        Some(file) => self.run_builtin(state, &invocation, file),
+                        None if !is_last => self.run_builtin(state, &invocation, &mut captured),
+                        None => self.run_builtin(state, &invocation, &mut io::stdout().lock()),
+                    };
+
+                    if !is_last && file_stdout.is_none() {
+                        next_bytes = Some(captured);
+                    }
+                    if is_last {
+                        last_status = status;
+                    }
+                }
+
+                ResolvedCommand::External { path, invocation } => {
+                    let mut process = Command::new(path);
+                    process.arg0(&invocation.name).args(&invocation.args);
+
+                    if let Some(stdin) = stdin {
+                        process.stdin(stdin);
+                    }
+
+                    if let Some(file) = file_stdout.take() {
+                        process.stdout(Stdio::from(file));
+                    } else if !is_last {
+                        match io::pipe() {
+                            Ok((reader, writer)) => {
+                                process.stdout(Stdio::from(writer));
+                                next_stdin = Some(reader);
+                            }
+                            Err(err) => {
+                                eprintln!("pipe: {err}");
+                                last_status = 1;
+                                break;
+                            }
+                        }
+                    }
+
+                    match process.spawn() {
+                        Ok(child) => {
+                            if is_last {
+                                last_child = Some(children.len());
+                            }
+                            children.push(child);
+                        }
+                        Err(err) => {
+                            eprintln!("{}: {}", invocation.name, describe_io_error(&err));
+                            if is_last {
+                                last_status = spawn_failure_code(&err);
+                            }
+                        }
+                    }
+                }
             }
+        }
 
-            "cd" => self.cd(state, invocation),
+        if background {
+            state.background.extend(children);
+            return 0;
+        }
 
-            _ => Err(format!(
-                "unimplemented builtin: {}",
-                invocation.name
-            )),
+        let mut codes = Vec::with_capacity(children.len());
+        for mut child in children {
+            codes.push(child.wait().map(status_code).unwrap_or(1));
+        }
+
+        if let Some(index) = last_child {
+            last_status = codes[index];
+        }
+
+        last_status
+    }
+
+    fn run_builtin(
+        &self,
+        state: &mut ShellState,
+        invocation: &CommandInvocation,
+        out: &mut dyn Write,
+    ) -> i32 {
+        if invocation.name == "exit" {
+            return self.exit(state, invocation);
+        }
+
+        let result = match invocation.name.as_str() {
+            "echo" => writeln!(out, "{}", invocation.args.join(" ")).map_err(|e| e.to_string()),
+
+            "pwd" => env::current_dir()
+                .map_err(|e| e.to_string())
+                .and_then(|cwd| writeln!(out, "{}", cwd.display()).map_err(|e| e.to_string())),
+
+            "cd" => self.cd(state, invocation, out),
+
+            other => Err(format!("{other}: builtin not implemented")),
+        };
+
+        match result {
+            Ok(()) => 0,
+            Err(message) => {
+                eprintln!("{message}");
+                1
+            }
         }
     }
 
-    fn execute_function(
-        &self,
-        invocation: CommandInvocation,
-        _redirects: ResolvedRedirections,
-    ) -> Result<(), String> {
-        Err(format!(
-            "function not implemented: {}",
-            invocation.name
-        ))
-    }
+    /// `exit [N]`. With no argument, the status of the last command is used.
+    fn exit(&self, state: &mut ShellState, invocation: &CommandInvocation) -> i32 {
+        let code = match invocation.args.first() {
+            None => state.last_status,
+            Some(arg) => match arg.parse::<i32>() {
+                Ok(n) => n & 0xff,
+                Err(_) => {
+                    eprintln!("exit: {arg}: numeric argument required");
+                    2
+                }
+            },
+        };
 
-    fn execute_external(
-        &self,
-        path: PathBuf,
-        invocation: CommandInvocation,
-        redirects: ResolvedRedirections,
-    ) -> Result<(), String> {
-        let mut command = Command::new(path);
-
-        command.args(&invocation.args);
-
-        // External commands use child-process stdio configuration.
-        if let Some(file) = redirects.stdin {
-            command.stdin(Stdio::from(file));
-        }
-
-        if let Some(file) = redirects.stdout {
-            command.stdout(Stdio::from(file));
-        }
-
-        // Unconfigured streams inherit the shell's streams.
-        let status = command
-            .status()
-            .map_err(|e| e.to_string())?;
-
-        if !status.success() {
-            return Err(format!(
-                "process exited with status {}",
-                status
-            ));
-        }
-
-        Ok(())
+        state.exit_requested = Some(code);
+        code
     }
 
     fn cd(
         &self,
         state: &mut ShellState,
-        invocation: CommandInvocation,
+        invocation: &CommandInvocation,
+        out: &mut dyn Write,
     ) -> Result<(), String> {
-        let raw_target = if invocation.args.is_empty() {
-            "~"
-        } else {
-            &invocation.args[0]
-        };
+        let raw_target = invocation.args.first().map(String::as_str).unwrap_or("~");
 
         let target = self.expand_cd_target(state, raw_target)?;
 
-        let old_dir =
-            std::env::current_dir().map_err(|e| e.to_string())?;
+        let old_dir = env::current_dir().map_err(|e| e.to_string())?;
 
-        std::env::set_current_dir(&target)
-            .map_err(|e| format!("cd: {}: {}", target, e))?;
+        env::set_current_dir(&target).map_err(|e| format!("cd: {}: {}", target, e))?;
 
-        let new_dir =
-            std::env::current_dir().map_err(|e| e.to_string())?;
+        let new_dir = env::current_dir().map_err(|e| e.to_string())?;
 
         state.previous_directory = Some(old_dir);
         state.cwd = new_dir.clone();
 
         if raw_target == "-" {
-            println!("{}", new_dir.display());
+            writeln!(out, "{}", new_dir.display()).map_err(|e| e.to_string())?;
         }
 
         Ok(())
     }
 
-    fn expand_cd_target(
-        &self,
-        state: &ShellState,
-        target: &str,
-    ) -> Result<String, String> {
+    fn expand_cd_target(&self, state: &ShellState, target: &str) -> Result<String, String> {
         match target {
             "-" => state
                 .previous_directory
@@ -229,13 +292,10 @@ impl Executor {
                 .map(|p| p.to_string_lossy().to_string())
                 .ok_or_else(|| "cd: OLDPWD not set".to_string()),
 
-            "~" => std::env::var("HOME")
-                .map_err(|_| "HOME not set".to_string()),
+            "~" => env::var("HOME").map_err(|_| "HOME not set".to_string()),
 
             _ if target.starts_with("~/") => {
-                let home = std::env::var("HOME")
-                    .map_err(|_| "HOME not set".to_string())?;
-
+                let home = env::var("HOME").map_err(|_| "HOME not set".to_string())?;
                 Ok(format!("{}/{}", home, &target[2..]))
             }
 
@@ -244,105 +304,51 @@ impl Executor {
     }
 }
 
-
-/// Saves stdin/stdout and restores them when dropped.
-///
-/// This guard ensures that builtin redirection does not permanently
-/// change the shell's own file descriptors.
-struct FdRestoreGuard {
-    stdin_backup: RawFd,
-    stdout_backup: RawFd,
-}
-
-impl FdRestoreGuard {
-    fn new() -> io::Result<Self> {
-        io::stdout().flush()?;
-
-        let stdout_backup = unsafe {
-            libc::dup(libc::STDOUT_FILENO)
-        };
-
-        if stdout_backup == -1 {
-            return Err(io::Error::last_os_error());
-        }
-
-        let stdin_backup = unsafe {
-            libc::dup(libc::STDIN_FILENO)
-        };
-
-        if stdin_backup == -1 {
-            unsafe {
-                libc::close(stdout_backup);
-            }
-
-            return Err(io::Error::last_os_error());
-        }
-
-        Ok(Self {
-            stdin_backup,
-            stdout_backup,
-        })
+/// Works out what a stage reads from. A `<` file wins over a pipe.
+fn take_stdin(
+    file: Option<File>,
+    next_stdin: &mut Option<PipeReader>,
+    next_bytes: &mut Option<Vec<u8>>,
+) -> Result<Option<Stdio>, String> {
+    if let Some(file) = file {
+        return Ok(Some(Stdio::from(file)));
     }
+
+    if let Some(reader) = next_stdin.take() {
+        return Ok(Some(Stdio::from(reader)));
+    }
+
+    if let Some(bytes) = next_bytes.take() {
+        // Feed captured builtin output through a pipe. A thread does the write
+        // so a large buffer cannot block the shell before the child starts reading.
+        let (reader, mut writer) = io::pipe().map_err(|e| format!("pipe: {e}"))?;
+        thread::spawn(move || {
+            let _ = writer.write_all(&bytes);
+        });
+        return Ok(Some(Stdio::from(reader)));
+    }
+
+    Ok(None)
 }
 
-impl Drop for FdRestoreGuard {
-    fn drop(&mut self) {
-        let _ = io::stdout().flush();
+fn status_code(status: ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| status.signal().map(|sig| 128 + sig))
+        .unwrap_or(1)
+}
 
-        unsafe {
-            libc::dup2(
-                self.stdout_backup,
-                libc::STDOUT_FILENO,
-            );
-
-            libc::dup2(
-                self.stdin_backup,
-                libc::STDIN_FILENO,
-            );
-
-            libc::close(self.stdout_backup);
-            libc::close(self.stdin_backup);
-        }
+fn spawn_failure_code(err: &io::Error) -> i32 {
+    match err.kind() {
+        io::ErrorKind::NotFound => 127,
+        _ => 126,
     }
 }
 
-
-/// Applies already-resolved file handles to the shell process.
-/// Used only for in-process commands such as builtins.
-fn apply_to_shell(
-    redirects: &ResolvedRedirections,
-) -> Result<(), String> {
-    if let Some(file) = &redirects.stdin {
-        let result = unsafe {
-            libc::dup2(
-                file.as_raw_fd(),
-                libc::STDIN_FILENO,
-            )
-        };
-
-        if result == -1 {
-            return Err(format!(
-                "Failed to redirect stdin: {}",
-                io::Error::last_os_error()
-            ));
-        }
+fn describe_io_error(err: &io::Error) -> String {
+    match err.kind() {
+        io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => err.to_string(),
     }
-
-    if let Some(file) = &redirects.stdout {
-        let result = unsafe {
-            libc::dup2(
-                file.as_raw_fd(),
-                libc::STDOUT_FILENO,
-            )
-        };
-
-        if result == -1 {
-            return Err(format!(
-                "Failed to redirect stdout: {}",
-                io::Error::last_os_error()
-            ));
-        }
-    }
-
-    Ok(())
 }
