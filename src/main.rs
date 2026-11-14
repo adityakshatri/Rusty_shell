@@ -1,3 +1,4 @@
+//entry point of the shell program
 mod frontend;
 mod shell;
 mod state;

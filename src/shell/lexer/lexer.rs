@@ -1,12 +1,12 @@
 use super::scanner::Scanner;
 use super::state::LexerState;
-use super::token::Token;
+use super::token::{Quoting, Token, Word, WordPart};
 
 pub struct Lexer<'a> {
     scanner: Scanner<'a>,
     state: LexerState,
     tokens: Vec<Token>,
-    current_word: String,
+    parts: Vec<WordPart>,
     word_started: bool,
 }
 
@@ -16,7 +16,7 @@ impl<'a> Lexer<'a> {
             scanner: Scanner::new(input),
             state: LexerState::Normal,
             tokens: Vec::new(),
-            current_word: String::new(),
+            parts: Vec::new(),
             word_started: false,
         }
     }
@@ -48,13 +48,13 @@ impl<'a> Lexer<'a> {
             }
 
             '\'' => {
-                self.word_started = true;
+                self.open_quote(Quoting::Single);
                 self.state = LexerState::SingleQuote;
                 self.scanner.advance();
             }
 
             '"' => {
-                self.word_started = true;
+                self.open_quote(Quoting::Double);
                 self.state = LexerState::DoubleQuote;
                 self.scanner.advance();
             }
@@ -96,13 +96,13 @@ impl<'a> Lexer<'a> {
 
             _ => {
                 self.word_started = true;
-                self.current_word.push(current);
+                self.push_char(Quoting::Unquoted, current);
                 self.scanner.advance();
             }
         }
     }
 
-    /// Ends the current word, emits an operator token, and consumes its characters.
+    /// Ends the current word, emits an operator, and consumes its characters.
     fn push_operator(&mut self, token: Token, width: usize) {
         self.emit_word();
         self.tokens.push(token);
@@ -111,33 +111,52 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Appends a character, merging it into the last part if the quoting matches.
+    fn push_char(&mut self, quoting: Quoting, c: char) {
+        match self.parts.last_mut() {
+            Some(part) if part.quoting == quoting => part.text.push(c),
+            _ => self.parts.push(WordPart {
+                quoting,
+                text: c.to_string(),
+            }),
+        }
+    }
+
+    /// Starts a quoted section. An empty part is added right away so `""` still makes an argument.
+    fn open_quote(&mut self, quoting: Quoting) {
+        self.word_started = true;
+        self.parts.push(WordPart {
+            quoting,
+            text: String::new(),
+        });
+    }
+
     fn lex_single_quote(&mut self) {
         while let Some(c) = self.scanner.current() {
+            self.scanner.advance();
             if c == '\'' {
-                self.scanner.advance();
                 self.state = LexerState::Normal;
                 return;
             }
-            self.current_word.push(c);
-            self.scanner.advance();
+            self.push_char(Quoting::Single, c);
         }
     }
 
     fn lex_double_quote(&mut self) {
         while let Some(c) = self.scanner.current() {
+            self.scanner.advance();
             if c == '"' {
-                self.scanner.advance();
                 self.state = LexerState::Normal;
                 return;
             }
-            self.current_word.push(c);
-            self.scanner.advance();
+            self.push_char(Quoting::Double, c);
         }
     }
 
+    /// The character after a backslash is taken literally.
     fn lex_escape(&mut self) {
         if let Some(c) = self.scanner.current() {
-            self.current_word.push(c);
+            self.push_char(Quoting::Single, c);
             self.scanner.advance();
         }
         self.state = LexerState::Normal;
@@ -145,9 +164,44 @@ impl<'a> Lexer<'a> {
 
     fn emit_word(&mut self) {
         if self.word_started {
-            self.tokens
-                .push(Token::Word(std::mem::take(&mut self.current_word)));
+            let parts = std::mem::take(&mut self.parts);
+            self.tokens.push(Token::Word(Word { parts }));
             self.word_started = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lex(input: &str) -> Vec<Token> {
+        Lexer::new(input).lex()
+    }
+
+    #[test]
+    fn operators_are_split() {
+        let tokens = lex("a&&b||c|d&e;f");
+        assert!(tokens.contains(&Token::AndIf));
+        assert!(tokens.contains(&Token::OrIf));
+        assert!(tokens.contains(&Token::Pipe));
+        assert!(tokens.contains(&Token::Background));
+        assert!(tokens.contains(&Token::Semicolon));
+    }
+
+    #[test]
+    fn single_quotes_are_marked_literal() {
+        let tokens = lex("'$X'");
+        let Token::Word(word) = &tokens[0] else {
+            panic!("expected a word");
+        };
+        assert_eq!(word.parts[0].quoting, Quoting::Single);
+        assert_eq!(word.parts[0].text, "$X");
+    }
+
+    #[test]
+    fn empty_quotes_make_a_word() {
+        let tokens = lex("\"\"");
+        assert!(matches!(&tokens[0], Token::Word(w) if w.parts.len() == 1));
     }
 }

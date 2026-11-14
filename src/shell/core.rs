@@ -1,3 +1,4 @@
+// Core shell loop and state management.
 use crate::frontend::ShellCompleter;
 use crate::shell::executor::Executor;
 use crate::shell::lexer::Lexer;

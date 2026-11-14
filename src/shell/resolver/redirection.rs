@@ -52,4 +52,4 @@ pub fn resolve(redirects: &[Redirect]) -> Result<ResolvedRedirections, String> {
     }
 
     Ok(resolved)
-}s
+}

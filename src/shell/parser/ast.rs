@@ -1,4 +1,4 @@
-/// Redirection kinds supported by the shell.
+// Redirection kinds supported by the shell.
 #[derive(Debug, Clone)]
 pub enum RedirectMode {
     Input,  // <
@@ -13,7 +13,13 @@ pub struct Redirect {
     pub target: String,
 }
 
-/// A single command: `name args... redirects...`.
+#[derive(Debug, Clone)]
+pub struct Assignment {
+    pub name: String,
+    pub value: Word,
+}
+
+// A single command: `name args... redirects...`.
 #[derive(Debug, Clone)]
 pub struct SimpleCommand {
     pub command: String,
@@ -21,7 +27,7 @@ pub struct SimpleCommand {
     pub redirects: Vec<Redirect>,
 }
 
-/// `cmd1 | cmd2 | cmd3`
+// `cmd1 | cmd2 | cmd3`
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub commands: Vec<SimpleCommand>,
@@ -33,7 +39,7 @@ pub enum Connector {
     Or,  // ||
 }
 
-/// `p1 && p2 || p3`, evaluated left to right with short-circuiting.
+// `p1 && p2 || p3`, evaluated left to right with short-circuiting.
 #[derive(Debug, Clone)]
 pub struct AndOr {
     pub first: Pipeline,
@@ -46,14 +52,14 @@ pub enum Separator {
     Background, // &
 }
 
-/// One entry of a command list, plus how it is terminated.
+// One entry of a command list, plus how it is terminated.
 #[derive(Debug, Clone)]
 pub struct ListItem {
     pub and_or: AndOr,
     pub separator: Separator,
 }
 
-/// A whole input line.
+// A whole input line.
 #[derive(Debug, Clone, Default)]
 pub struct AST {
     pub items: Vec<ListItem>,

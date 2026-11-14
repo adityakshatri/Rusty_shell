@@ -5,5 +5,5 @@ pub mod state;
 
 pub use lexer::Lexer;
 pub use scanner::Scanner;
-pub use token::Token;
 pub use state::LexerState;
+pub use token::{Quoting, Token, Word, WordPart};

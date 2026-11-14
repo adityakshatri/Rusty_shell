@@ -108,8 +108,16 @@ impl Parser {
                 Some(Token::Word(word)) => {
                     words.push(word.clone());
                     self.advance();
-                    continue;
-                }
+                    
+                    if words.is_empty() {
+                        if let Some(assignment) = split_assignment(&word) {
+                            assignments.push(assignment);
+                            continue;
+                        }
+                    }
+                    words.push(word);
+                    continue;  
+                              }
                 Some(Token::RedirectIn) => RedirectMode::Input,
                 Some(Token::RedirectOut) => RedirectMode::Output,
                 Some(Token::RedirectAppend) => RedirectMode::Append,
@@ -149,6 +157,36 @@ impl Parser {
     }
 }
 
+
+/// Splits `NAME=value` into an assignment when the `NAME` part is an unquoted, valid name.
+fn split_assignment(word: &Word) -> Option<Assignment> {
+    let first = word.parts.first()?;
+    if first.quoting != Quoting::Unquoted {
+        return None;
+    }
+
+    let eq = first.text.find('=')?;
+    let name = &first.text[..eq];
+    if !is_valid_name(name) {
+        return None;
+    }
+
+    let mut parts = Vec::new();
+    let rest = &first.text[eq + 1..];
+    if !rest.is_empty() {
+        parts.push(WordPart {
+            quoting: Quoting::Unquoted,
+            text: rest.to_string(),
+        });
+    }
+    parts.extend(word.parts[1..].iter().cloned());
+
+    Some(Assignment {
+        name: name.to_string(),
+        value: Word { parts },
+    })
+}
+
 fn token_text(token: Option<&Token>) -> String {
     match token {
         None | Some(Token::EOF) => "newline".to_string(),
@@ -168,4 +206,50 @@ fn token_text(token: Option<&Token>) -> String {
 
 fn syntax_error(token: Option<&Token>) -> String {
     format!("syntax error near unexpected token `{}`", token_text(token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::shell::lexer::Lexer;
+
+    fn parse(input: &str) -> AST {
+        Parser::new(Lexer::new(input).lex()).parse().unwrap()
+    }
+
+    fn parse_err(input: &str) -> String {
+        Parser::new(Lexer::new(input).lex()).parse().unwrap_err()
+    }
+
+    #[test]
+    fn parses_list_structure() {
+        let ast = parse("a | b && c; d &");
+        assert_eq!(ast.items.len(), 2);
+        assert_eq!(ast.items[0].separator, Separator::Sequential);
+        assert_eq!(ast.items[1].separator, Separator::Background);
+        assert_eq!(ast.items[0].and_or.first.commands.len(), 2);
+        assert_eq!(ast.items[0].and_or.rest.len(), 1);
+    }
+
+    #[test]
+    fn rejects_leading_semicolon() {
+        assert!(parse_err("; ls").contains("syntax error"));
+    }
+
+    #[test]
+    fn leading_assignment_is_not_an_argument() {
+        let ast = parse("X=1 echo hi");
+        let command = &ast.items[0].and_or.first.commands[0];
+        assert_eq!(command.assignments.len(), 1);
+        assert_eq!(command.assignments[0].name, "X");
+        assert_eq!(command.words.len(), 2);
+    }
+
+    #[test]
+    fn assignment_after_command_is_an_argument() {
+        let ast = parse("echo X=1");
+        let command = &ast.items[0].and_or.first.commands[0];
+        assert!(command.assignments.is_empty());
+        assert_eq!(command.words.len(), 2);
+    }
 }
