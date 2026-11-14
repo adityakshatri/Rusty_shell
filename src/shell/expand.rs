@@ -1,4 +1,3 @@
-// expansion of words and commands. This is separate from parsing because it needs to be done after parsing, and it also needs access to the shell state (environment variables, etc.).
 use std::process;
 
 use crate::shell::lexer::{Quoting, Word};

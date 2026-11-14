@@ -1,14 +1,16 @@
-use crate::shell::lexer::Token;
+use crate::shell::lexer::{Quoting, Token, Word, WordPart};
 use crate::shell::parser::{
-    AndOr, Connector, ListItem, Pipeline, Redirect, RedirectMode, Separator, SimpleCommand, AST,
+    AndOr, Assignment, Connector, ListItem, Pipeline, Redirect, RedirectMode, Separator,
+    SimpleCommand, AST,
 };
+use crate::state::is_valid_name;
 
 // Grammar:
-//   list        := (and_or (';' | '&'))* and_or? 
-//   and_or      := pipeline (('&&' | '||') pipeline)*
-//   pipeline    := simple ('|' simple)*
-//   simple      := (WORD | redirect)+        (at least one WORD)
-//   redirect    := ('<' | '>' | '>>') WORD
+//   list      := (and_or (';' | '&'))* and_or?
+//   and_or    := pipeline (('&&' | '||') pipeline)*
+//   pipeline  := simple ('|' simple)*
+//   simple    := (assignment)* (WORD | redirect)*    with a command word or an assignment
+//   redirect  := ('<' | '>' | '>>') WORD
 
 pub struct Parser {
     pub tokens: Vec<Token>,
@@ -45,7 +47,7 @@ impl Parser {
         let mut items = Vec::new();
 
         while !self.at_end() {
-            // A statement cannot start with a separator (e.g. `; ls` or `& &`).
+            // A statement cannot start with a separator, e.g. `; ls`.
             if matches!(self.peek(), Some(Token::Semicolon | Token::Background)) {
                 return Err(syntax_error(self.peek()));
             }
@@ -100,24 +102,27 @@ impl Parser {
     }
 
     fn parse_simple_command(&mut self) -> Result<SimpleCommand, String> {
-        let mut words = Vec::new();
+        let mut assignments = Vec::new();
+        let mut words: Vec<Word> = Vec::new();
         let mut redirects = Vec::new();
 
         loop {
             let mode = match self.peek() {
                 Some(Token::Word(word)) => {
-                    words.push(word.clone());
+                    let word = word.clone();
                     self.advance();
-                    
+
+                    // Assignments are only recognized before the command name.
                     if words.is_empty() {
                         if let Some(assignment) = split_assignment(&word) {
                             assignments.push(assignment);
                             continue;
                         }
                     }
+
                     words.push(word);
-                    continue;  
-                              }
+                    continue;
+                }
                 Some(Token::RedirectIn) => RedirectMode::Input,
                 Some(Token::RedirectOut) => RedirectMode::Output,
                 Some(Token::RedirectAppend) => RedirectMode::Append,
@@ -129,34 +134,31 @@ impl Parser {
             redirects.push(Redirect { mode, target });
         }
 
-        if words.is_empty() {
+        if words.is_empty() && assignments.is_empty() {
             if self.at_end() {
                 return Err("syntax error: expected a command".to_string());
             }
             return Err(syntax_error(self.peek()));
         }
 
-        let command = words.remove(0);
-
         Ok(SimpleCommand {
-            command,
-            args: words,
+            assignments,
+            words,
             redirects,
         })
     }
 
-    fn take_redirect_target(&mut self) -> Result<String, String> {
+    fn take_redirect_target(&mut self) -> Result<Word, String> {
         match self.peek() {
-            Some(Token::Word(name)) => {
-                let name = name.clone();
+            Some(Token::Word(word)) => {
+                let word = word.clone();
                 self.advance();
-                Ok(name)
+                Ok(word)
             }
             _ => Err("syntax error: expected filename after redirection".to_string()),
         }
     }
 }
-
 
 /// Splits `NAME=value` into an assignment when the `NAME` part is an unquoted, valid name.
 fn split_assignment(word: &Word) -> Option<Assignment> {
@@ -190,7 +192,7 @@ fn split_assignment(word: &Word) -> Option<Assignment> {
 fn token_text(token: Option<&Token>) -> String {
     match token {
         None | Some(Token::EOF) => "newline".to_string(),
-        Some(Token::Word(word)) => word.clone(),
+        Some(Token::Word(word)) => word.raw_text(),
         Some(Token::Pipe) => "|".to_string(),
         Some(Token::AndIf) => "&&".to_string(),
         Some(Token::OrIf) => "||".to_string(),

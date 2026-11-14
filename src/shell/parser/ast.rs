@@ -1,3 +1,5 @@
+use crate::shell::lexer::Word;
+
 // Redirection kinds supported by the shell.
 #[derive(Debug, Clone)]
 pub enum RedirectMode {
@@ -10,7 +12,7 @@ pub enum RedirectMode {
 #[derive(Debug, Clone)]
 pub struct Redirect {
     pub mode: RedirectMode,
-    pub target: String,
+    pub target: Word,
 }
 
 #[derive(Debug, Clone)]
@@ -22,8 +24,8 @@ pub struct Assignment {
 // A single command: `name args... redirects...`.
 #[derive(Debug, Clone)]
 pub struct SimpleCommand {
-    pub command: String,
-    pub args: Vec<String>,
+    pub assignments: Vec<Assignment>,
+    pub words: Vec<Word>,
     pub redirects: Vec<Redirect>,
 }
 

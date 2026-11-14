@@ -7,21 +7,21 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::resolved::{CommandInvocation, ResolvedCommand};
-use crate::shell::parser::SimpleCommand;
+use crate::shell::expand::ExpandedCommand;
 
 pub const SPECIAL_BUILTINS: &[&str] = &["break", "continue", "return", "exec", "exit"];
-pub const BUILTINS: &[&str] = &["cd", "pwd", "echo", "history"];
+pub const BUILTINS: &[&str] = &["cd", "pwd", "echo", "export", "unset", "history"];
 
 /// Why a command could not be resolved. Each variant maps to a shell exit status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveError {
-    /// Name not found in PATH (exit 127).
+    /// Not found in PATH (exit 127).
     NotFound(String),
-    /// Path given with a slash does not exist (exit 127).
+    /// A path containing `/` does not exist (exit 127).
     NoSuchFile(String),
-    /// Found, but not executable (exit 126).
+    /// Found but not executable (exit 126).
     PermissionDenied(String),
-    /// Path given with a slash is a directory (exit 126).
+    /// A path containing `/` is a directory (exit 126).
     IsDirectory(String),
 }
 
@@ -59,13 +59,17 @@ impl Resolver {
         Self
     }
 
-    /// Turns a parsed simple command into something the executor can run.
-    pub fn resolve(&self, command: &SimpleCommand) -> Result<ResolvedCommand, ResolveError> {
-        let name = command.command.as_str();
+    /// Turns an expanded command into something the executor can run.
+    /// The command must have at least one word.
+    pub fn resolve(&self, command: &ExpandedCommand) -> Result<ResolvedCommand, ResolveError> {
+        let Some((name, args)) = command.words.split_first() else {
+            return Err(ResolveError::NotFound(String::new()));
+        };
+        let name = name.as_str();
 
         let invocation = || CommandInvocation {
-            name: command.command.clone(),
-            args: command.args.clone(),
+            name: name.to_string(),
+            args: args.to_vec(),
             redirects: command.redirects.clone(),
         };
 
@@ -115,15 +119,10 @@ impl Resolver {
         names
     }
 
-    fn resolve_path(
-        &self,
-        name: &str,
-        invocation: CommandInvocation,
-    ) -> Result<ResolvedCommand, ResolveError> {
+    fn resolve_path(&self, name: &str, invocation: CommandInvocation) -> Result<ResolvedCommand, ResolveError> {
         let path = PathBuf::from(name);
 
-        let metadata =
-            fs::metadata(&path).map_err(|_| ResolveError::NoSuchFile(name.to_string()))?;
+        let metadata = fs::metadata(&path).map_err(|_| ResolveError::NoSuchFile(name.to_string()))?;
 
         if metadata.is_dir() {
             return Err(ResolveError::IsDirectory(name.to_string()));
@@ -135,8 +134,8 @@ impl Resolver {
         Ok(ResolvedCommand::External { path, invocation })
     }
 
-    /// Walks PATH in order. A non-executable match does not stop the search,
-    /// but if nothing executable is found, it is reported as a permission error.
+    /// Walks PATH in order. A non-executable match does not end the search.
+    /// If nothing executable turns up, that is reported as a permission error.
     fn search_path(&self, name: &str) -> PathSearch {
         let Some(path_var) = env::var_os("PATH") else {
             return PathSearch::Missing;
@@ -168,7 +167,7 @@ impl Resolver {
     }
 }
 
-/// True if `path` is a regular file the current user may execute.
+/// True if `path` is a regular file the current user can execute.
 pub fn is_executable(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
@@ -181,6 +180,41 @@ pub fn is_executable(path: &Path) -> bool {
         return false;
     };
 
-    // access(2) checks the real permission bits for this user, not just the mode bits.
+    // access(2) checks the real permissions for this user, not just the mode bits.
     unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn non_executable_file_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("script.sh");
+        std::fs::write(&file, "echo hi").unwrap();
+
+        let path = file.to_string_lossy().into_owned();
+        let command = ExpandedCommand {
+            words: vec![path.clone()],
+            assignments: vec![],
+            redirects: vec![],
+        };
+
+        let err = Resolver::new().resolve(&command).unwrap_err();
+        assert_eq!(err, ResolveError::PermissionDenied(path));
+    }
+
+    #[test]
+    fn builtins_resolve_without_path_lookup() {
+        let command = ExpandedCommand {
+            words: vec!["echo".to_string(), "hi".to_string()],
+            assignments: vec![],
+            redirects: vec![],
+        };
+        assert!(matches!(
+            Resolver::new().resolve(&command),
+            Ok(ResolvedCommand::Builtin(_))
+        ));
+    }
 }

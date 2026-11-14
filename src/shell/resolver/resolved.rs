@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use crate::shell::parser::Redirect;
+use crate::shell::expand::ExpandedRedirect;
 
-/// A simple command after name resolution, ready to execute.
+/// A command after name resolution, ready to execute.
 #[derive(Debug, Clone)]
 pub enum ResolvedCommand {
-    /// Builtins whose failure affects the shell itself (e.g. `exit`).
+    /// Builtins that affect the shell itself, such as `exit`.
     SpecialBuiltin(CommandInvocation),
     Builtin(CommandInvocation),
     External {
@@ -31,5 +31,5 @@ impl ResolvedCommand {
 pub struct CommandInvocation {
     pub name: String,
     pub args: Vec<String>,
-    pub redirects: Vec<Redirect>,
+    pub redirects: Vec<ExpandedRedirect>,
 }

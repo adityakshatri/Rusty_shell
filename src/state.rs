@@ -42,18 +42,17 @@ pub struct ShellState {
 
 impl ShellState {
     pub fn new() -> Self {
-        Self {
             let mut vars = HashMap::new();
             let mut exported_vars = HashSet::new();
 
             // Initialize environment variables from the current process
             for (key, value) in std::env::vars_os(){
-                let key = key.into_string_lossy().into_owned();
-                vars.insert(key.clone(), value.into_string_lossy().into_owned());
+                let key = key.to_string_lossy().into_owned();
+                vars.insert(key.clone(), value.to_string_lossy().into_owned());
                 exported_vars.insert(key);
             }
 
-            self {
+            Self {
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
                 previous_directory: None,
                 last_status: 0,
@@ -62,15 +61,14 @@ impl ShellState {
                 vars,
                 exported_vars,
             }
-
-        
     }
+
     pub fn get_var(&self, name: &str) -> Option<&str> {
-            self.vars.get(name).map(String::as_str)
-
+        self.vars.get(name).map(String::as_str)
     }
-    pub fn set_var(&mut self, name: String, value: String) {
-        self.vars.insert(name.to_stirng(), value);
+
+    pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.vars.insert(name.into(), value.into());
     }
 
     pub fn export_var(&mut self, name:&str, value: Option<String>) {
@@ -85,8 +83,8 @@ impl ShellState {
         self.exported_vars.remove(name);
     }
 
-    pub fn var_names(&self) -> vec<&str> {
-        let mut names:Vec<&str> = self.vars.keys().map(String::as_str).collect();
+    pub fn var_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.vars.keys().cloned().collect();
         names.sort();
         names
     }
@@ -99,12 +97,13 @@ impl ShellState {
         }).collect()
     }
 
-    pub fn is_valid_name(name: &str) -> bool{
-        let mut chars  = name.chars();
-        match chars.next() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => (),
-            _ => return false,
-        }
-        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+pub fn is_valid_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => (),
+        _ => return false,
     }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }

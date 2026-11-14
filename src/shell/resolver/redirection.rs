@@ -1,6 +1,7 @@
-use crate::shell::parser::{Redirect, RedirectMode};
-
 use std::fs::{File, OpenOptions};
+
+use crate::shell::expand::ExpandedRedirect;
+use crate::shell::parser::RedirectMode;
 
 #[derive(Debug, Default)]
 pub struct ResolvedRedirections {
@@ -8,22 +9,15 @@ pub struct ResolvedRedirections {
     pub stdout: Option<File>,
 }
 
-impl ResolvedRedirections {
-    pub fn is_empty(&self) -> bool {
-        self.stdin.is_none() && self.stdout.is_none()
-    }
-}
-
-pub fn resolve(redirects: &[Redirect]) -> Result<ResolvedRedirections, String> {
+/// Opens every redirect file in source order. Later redirects replace earlier ones.
+pub fn resolve(redirects: &[ExpandedRedirect]) -> Result<ResolvedRedirections, String> {
     let mut resolved = ResolvedRedirections::default();
 
-    // Process redirects in source order.
     for redirect in redirects {
-        match &redirect.mode {
+        match redirect.mode {
             RedirectMode::Input => {
                 let file = File::open(&redirect.target)
                     .map_err(|e| format!("{}: {}", redirect.target, e))?;
-
                 resolved.stdin = Some(file);
             }
 
@@ -34,7 +28,6 @@ pub fn resolve(redirects: &[Redirect]) -> Result<ResolvedRedirections, String> {
                     .truncate(true)
                     .open(&redirect.target)
                     .map_err(|e| format!("{}: {}", redirect.target, e))?;
-
                 resolved.stdout = Some(file);
             }
 
@@ -45,7 +38,6 @@ pub fn resolve(redirects: &[Redirect]) -> Result<ResolvedRedirections, String> {
                     .append(true)
                     .open(&redirect.target)
                     .map_err(|e| format!("{}: {}", redirect.target, e))?;
-
                 resolved.stdout = Some(file);
             }
         }

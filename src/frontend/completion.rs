@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -26,11 +27,12 @@ enum PathFilter {
 
 pub struct ShellCompleter {
     resolver: Resolver,
+    variables: Arc<Mutex<Vec<String>>>,
 }
 
 impl ShellCompleter {
-    pub fn new(resolver: Resolver) -> Self {
-        Self { resolver }
+    pub fn new(resolver: Resolver, variables: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { resolver, variables }
     }
 
     /// Builtins and executables on PATH, filtered by prefix.
@@ -46,7 +48,7 @@ impl ShellCompleter {
             .collect()
     }
 
-    /// Files and directories relative to the typed directory part.
+    /// Files and directories relative to the directory part of the word.
     fn path_candidates(word: &str, filter: PathFilter) -> Vec<Pair> {
         if word == "~" {
             return vec![Pair {
@@ -55,7 +57,7 @@ impl ShellCompleter {
             }];
         }
 
-        // Split "some/dir/par" into "some/dir/" and "par".
+        // "some/dir/par" splits into "some/dir/" and "par".
         let (typed_dir, partial) = match word.rfind('/') {
             Some(index) => word.split_at(index + 1),
             None => ("", word),
@@ -107,23 +109,27 @@ impl ShellCompleter {
         pairs
     }
 
-    /// Hook for `$VAR` completion. Returns nothing until shell variables exist.
-    fn variable_candidates(&self, _prefix: &str) -> Vec<Pair> {
-        // TODO: once ShellState tracks variables, list names that start with `prefix`
-        // and return replacements that keep the leading `$`.
-        Vec::new()
+    /// `$NAME` completion from the variables the shell currently has.
+    fn variable_candidates(&self, prefix: &str) -> Vec<Pair> {
+        let Ok(names) = self.variables.lock() else {
+            return Vec::new();
+        };
+
+        names
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Pair {
+                display: format!("${name}"),
+                replacement: format!("${name}"),
+            })
+            .collect()
     }
 }
 
 impl Completer for ShellCompleter {
     type Candidate = Pair;
 
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
+    fn complete(&self, line: &str, pos: usize, _ctx: &Context<'_>) -> rustyline::Result<(usize, Vec<Pair>)> {
         let before_cursor = &line[..pos];
 
         let start = before_cursor
@@ -134,16 +140,13 @@ impl Completer for ShellCompleter {
         let word = &before_cursor[start..];
         let preceding = &before_cursor[..start];
 
-        // Only the current command segment matters: text after the last `|`, `&`, `;` or `(`.
-        let segment = preceding
-            .rsplit(['|', '&', ';', '('])
-            .next()
-            .unwrap_or("");
+        // Only the current command segment matters, i.e. the text after the last `|`, `&`, `;`, or `(`.
+        let segment = preceding.rsplit(['|', '&', ';', '(']).next().unwrap_or("");
         let at_command_start = segment.trim().is_empty();
         let command = segment.split_whitespace().next();
 
-        let candidates = if word.starts_with('$') {
-            self.variable_candidates(&word[1..])
+        let candidates = if let Some(prefix) = word.strip_prefix('$') {
+            self.variable_candidates(prefix)
         } else if at_command_start {
             self.command_candidates(word)
         } else if command == Some("cd") {
@@ -186,4 +189,3 @@ impl Highlighter for ShellCompleter {}
 impl Validator for ShellCompleter {}
 
 impl Helper for ShellCompleter {}
-
